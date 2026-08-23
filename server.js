@@ -53,7 +53,7 @@ async function getRecentTopics() {
   return new Set(result.rows.map((row) => row.topic));
 }
 
-async function generatePost(postType = 'Value') {
+async function generatePost(postType = 'Value', affiliateDetails = {}) {
   if (!process.env.DATABASE_URL || !ai) {
     const error = new Error('Set DATABASE_URL and GEMINI_API_KEY in .env before generating.');
     error.status = 503;
@@ -70,7 +70,14 @@ async function generatePost(postType = 'Value') {
     'Keep each tweet under 280 characters. Produce 6 to 9 tweets.',
     'Start with a sharp claim, include concrete implementation details, and end with a practical conclusion.',
     postType === 'Affiliate_Promotion'
-      ? 'Mention a relevant tool naturally once, clearly label the recommendation as an affiliate promotion, and avoid making unverifiable claims.'
+      ? [
+        `Target problem: ${affiliateDetails.targetProblem}`,
+        `Solution tool: ${affiliateDetails.solutionTool}`,
+        `Actionable link: ${affiliateDetails.actionableLink}`,
+        'Follow this exact progression: hook with an unpopular opinion or frustrating reality; agitation explaining why the manual approach is painful; pivot introducing the solution tool and exactly how it helps this problem; final tweet with a casual call to action containing the actionable link.',
+        'Clearly disclose that the link is an affiliate promotion without sounding like a marketer.',
+        'Do not invent product features, prices, results, or claims that were not provided.'
+      ].join(' ')
       : 'Keep the thread educational and do not include a product pitch.'
   ].join(' ');
 
@@ -124,7 +131,23 @@ app.post('/api/generate', async (request, response, next) => {
     if (!['Value', 'Affiliate_Promotion'].includes(postType)) {
       return response.status(400).json({ error: 'Invalid post type.' });
     }
-    response.status(201).json({ post: await generatePost(postType) });
+    const affiliateDetails = {
+      targetProblem: String(request.body?.targetProblem || '').trim(),
+      solutionTool: String(request.body?.solutionTool || '').trim(),
+      actionableLink: String(request.body?.actionableLink || '').trim()
+    };
+    if (postType === 'Affiliate_Promotion') {
+      if (!affiliateDetails.targetProblem || !affiliateDetails.solutionTool || !affiliateDetails.actionableLink) {
+        return response.status(400).json({ error: 'Affiliate posts require a target problem, solution tool, and actionable link.' });
+      }
+      try {
+        const link = new URL(affiliateDetails.actionableLink);
+        if (!['http:', 'https:'].includes(link.protocol)) throw new Error();
+      } catch {
+        return response.status(400).json({ error: 'Actionable link must be a valid http or https URL.' });
+      }
+    }
+    response.status(201).json({ post: await generatePost(postType, affiliateDetails) });
   } catch (error) {
     next(error);
   }
@@ -155,7 +178,9 @@ const HTML = `<!doctype html>
     h1 { margin: 8px 0 0; font-size: clamp(2.5rem, 7vw, 5.5rem); line-height: .92; font-weight: 400; letter-spacing: 0; }
     .sub { max-width: 280px; color: var(--muted); margin: 0; }
     .toolbar { display: flex; gap: 12px; align-items: center; padding: 24px 0; flex-wrap: wrap; }
-    select, button { border: 1px solid var(--ink); border-radius: 2px; min-height: 44px; padding: 0 14px; font: 700 13px ui-monospace, SFMono-Regular, Consolas, monospace; background: var(--panel); color: var(--ink); }
+    select, input, button { border: 1px solid var(--ink); border-radius: 2px; min-height: 44px; padding: 0 14px; font: 700 13px ui-monospace, SFMono-Regular, Consolas, monospace; background: var(--panel); color: var(--ink); }
+    .affiliate-fields { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; width: 100%; }
+    .affiliate-fields[hidden] { display: none; }
     button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
     button:hover { background: var(--accent-dark); border-color: var(--accent-dark); }
     button:disabled { opacity: .55; cursor: wait; }
@@ -165,7 +190,7 @@ const HTML = `<!doctype html>
     h2 { margin: 28px 0 20px; font-size: clamp(1.65rem, 4vw, 2.7rem); line-height: 1; font-weight: 400; }
     pre { white-space: pre-wrap; font: 17px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; margin: 0; }
     .empty { color: var(--muted); font-style: italic; }
-    @media (max-width: 620px) { main { padding-top: 32px; } .masthead { display: block; } .sub { margin-top: 18px; } .toolbar > * { width: 100%; } }
+    @media (max-width: 620px) { main { padding-top: 32px; } .masthead { display: block; } .sub { margin-top: 18px; } .toolbar > * { width: 100%; } .affiliate-fields { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -173,6 +198,11 @@ const HTML = `<!doctype html>
     <header class="masthead"><div><div class="kicker">Local draft engine / 001</div><h1>Thread<br>Studio</h1></div><p class="sub">Technical ideas with a memory. Built for the person who still reads query plans.</p></header>
     <section class="toolbar" aria-label="Draft controls">
       <select id="postType" aria-label="Post type"><option value="Value">Value thread</option><option value="Affiliate_Promotion">Affiliate promotion</option></select>
+      <div class="affiliate-fields" id="affiliateFields" hidden>
+        <input id="targetProblem" placeholder="Target problem" aria-label="Target problem">
+        <input id="solutionTool" placeholder="Solution tool" aria-label="Solution tool">
+        <input id="actionableLink" type="url" placeholder="Actionable link" aria-label="Actionable link">
+      </div>
       <button id="generate">Generate draft</button><button id="copy" disabled>Copy to clipboard</button><span class="status" id="status">Loading latest draft...</span>
     </section>
     <article><div class="meta"><span id="type">No draft yet</span><span id="date"></span></div><h2 id="topic">Ready when you are.</h2><pre id="content" class="empty">Generate a draft to put a production-tested opinion in the queue.</pre></article>
@@ -185,6 +215,8 @@ const HTML = `<!doctype html>
     const status = document.querySelector('#status');
     const generate = document.querySelector('#generate');
     const copy = document.querySelector('#copy');
+    const postType = document.querySelector('#postType');
+    const affiliateFields = document.querySelector('#affiliateFields');
     let latestText = '';
     function showPost(post) {
       if (!post) return;
@@ -196,6 +228,7 @@ const HTML = `<!doctype html>
       date.textContent = new Date(post.created_at).toLocaleString();
       copy.disabled = false;
     }
+    postType.addEventListener('change', () => { affiliateFields.hidden = postType.value !== 'Affiliate_Promotion'; });
     async function loadLatest() {
       try { showPost((await (await fetch('/api/latest')).json()).post); status.textContent = 'Memory loaded'; }
       catch (error) { status.textContent = 'Database unavailable'; }
@@ -203,7 +236,12 @@ const HTML = `<!doctype html>
     generate.addEventListener('click', async () => {
       generate.disabled = true; copy.disabled = true; status.textContent = 'Writing a fresh draft...';
       try {
-        const result = await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ postType: document.querySelector('#postType').value }) });
+        const result = await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          postType: postType.value,
+          targetProblem: document.querySelector('#targetProblem').value,
+          solutionTool: document.querySelector('#solutionTool').value,
+          actionableLink: document.querySelector('#actionableLink').value
+        }) });
         const data = await result.json();
         if (!result.ok) throw new Error(data.error);
         showPost(data.post); status.textContent = 'Saved to PostgreSQL';
