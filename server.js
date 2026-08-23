@@ -93,7 +93,14 @@ async function generatePost(postType = 'Value', affiliateDetails = {}) {
     const canFallback = model !== fallbackModel && /(?:503|UNAVAILABLE|NOT_FOUND|high demand|no longer available)/i.test(message);
     if (!canFallback) throw error;
     console.warn(`Gemini model ${model} unavailable; retrying with ${fallbackModel}.`);
-    response = await ai.models.generateContent({ ...request, model: fallbackModel });
+    try {
+      response = await ai.models.generateContent({ ...request, model: fallbackModel });
+    } catch (fallbackError) {
+      const fallbackMessage = String(fallbackError.message || fallbackError);
+      if (!/(?:503|UNAVAILABLE|high demand)/i.test(fallbackMessage)) throw fallbackError;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      response = await ai.models.generateContent({ ...request, model: fallbackModel });
+    }
   }
   const content = response.text?.trim();
   if (!content) throw new Error('Gemini returned an empty draft.');
